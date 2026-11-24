@@ -68,10 +68,12 @@ class FastPortDetector:
                     bytesize=EIGHTBITS, parity=PARITY_NONE, stopbits=STOPBITS_ONE)
                 reader, writer = await connector
             except SerialException:
-                self.log.error("Could not connect to port %s. Are you connected via CoolTerm? :)", port)
+                self.platform.log.error("Could not connect to port %s. Are you connected via CoolTerm? :)", port)
+                return
 
             self.platform.debug_log(" - success connecting to port %s", port)
             self.task_writers[asyncio.current_task()] = writer
+            await self._clear_port(reader, writer)
 
             total_attempts = 5
             attempts = 0
@@ -95,6 +97,24 @@ class FastPortDetector:
                 attempts += 1
             self.platform.debug_log("Unable to get ID: on port %s after %s retries.", port, total_attempts)
             return
+
+    @staticmethod
+    async def _clear_port(reader, writer, quiet_period=0.1, max_drain_time=2.0):
+        """Clear the port before the first ID:, as the communicators do on connect.
+
+        A board can still be sending leftover bytes from an earlier session, and its
+        line buffer can hold an unfinished command. Without this, the ID: replies
+        queue behind the old bytes and every attempt reads only those.
+        """
+        writer.transport.serial.reset_input_buffer()
+        writer.write(b'\r\r\r\r')
+        deadline = asyncio.get_running_loop().time() + max_drain_time
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                if not await asyncio.wait_for(reader.read(1024), quiet_period):
+                    return
+            except asyncio.TimeoutError:
+                return
 
     def _report_success(self, processor, port):
         self.results[processor] = port
